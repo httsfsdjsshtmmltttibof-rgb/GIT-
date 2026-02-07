@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Spatial Creator Pro - 2 Hands & Drag</title>
+    <style>
+        :root { --neon: #00f2ff; --pink: #ff00ff; --bg: #030303; }
+        body { margin: 0; overflow: hidden; background: var(--bg); font-family: 'Orbitron', sans-serif; color: white; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; z-index: 1; }
+        
+        /* Dashboard Interface */
+        #dashboard {
+            position: absolute; top: 20px; left: 20px; z-index: 10;
+            background: rgba(0,0,0,0.85); padding: 25px; border-radius: 20px;
+            border: 1px solid var(--neon); box-shadow: 0 0 30px rgba(0,242,255,0.2);
+            backdrop-filter: blur(15px); width: 280px;
+        }
+        
+        .mode-indicator { display: flex; align-items: center; margin-bottom: 15px; font-size: 12px; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 10px; background: #333; }
+        .dot.active { background: var(--neon); box-shadow: 0 0 10px var(--neon); }
+        
+        #video-preview {
+            position: absolute; bottom: 20px; right: 20px; z-index: 5;
+            border: 2px solid var(--neon); border-radius: 20px;
+            width: 260px; height: 195px; transform: scaleX(-1);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+        }
+
+        .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+        button {
+            background: transparent; border: 1px solid var(--neon); color: var(--neon);
+            padding: 10px; border-radius: 8px; cursor: pointer; transition: 0.3s;
+            font-family: 'Orbitron'; font-size: 10px;
+        }
+        button:hover { background: var(--neon); color: black; box-shadow: 0 0 20px var(--neon); }
+
+        #system-loader {
+            position: absolute; inset: 0; z-index: 1000; background: #000;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+    <div id="system-loader">
+        <h1 style="color:var(--neon); letter-spacing: 10px;">INITIALIZING AI</h1>
+        <p style="color:#555;">DUAL-HAND SPATIAL ENGINE V3.0</p>
+    </div>
+
+    <div id="dashboard">
+        <h3 style="margin:0 0 20px 0; color:var(--neon); border-bottom:1px solid #333; padding-bottom:10px;">CONTROL PANEL</h3>
+        <div class="mode-indicator"><div id="dot-left" class="dot"></div> LEFT HAND TRACKED</div>
+        <div class="mode-indicator"><div id="dot-right" class="dot"></div> RIGHT HAND TRACKED</div>
+        <div class="mode-indicator"><div id="dot-draw" class="dot"></div> DRAWING MODE</div>
+        <div class="mode-indicator"><div id="dot-drag" class="dot"></div> DRAG & MOVE MODE</div>
+        
+        <div class="btn-group">
+            <button onclick="clearAll()">CLEAR SPACE</button>
+            <button onclick="toggleSkeleton()">SKELETON ON/OFF</button>
+        </div>
+        <div style="margin-top:20px; font-size:9px; color:#888; line-height:1.5;">
+            DRAW: Point Index Finger<br>
+            DRAG: Pinch Thumb & Index<br>
+            CLEAR: Make a Fist
+        </div>
+    </div>
+
+    <video id="input_video" style="display:none;"></video>
+    <video id="video-preview" autoplay muted playsinline></video>
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        let scene, camera, renderer, lineGroup, handsGroup;
+        let handsData = [ { points: [], skeleton: null }, { points: [], skeleton: null } ];
+        let activeLines = [];
+        let draggingObject = null;
+        let showSkeleton = true;
+
+        const PALETTE = [0x00f2ff, 0xff00ff, 0xffff00, 0x00ff00, 0xff4d00];
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 70;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            lineGroup = new THREE.Group();
+            handsGroup = new THREE.Group();
+            scene.add(lineGroup, handsGroup);
+
+            // Create markers for 2 hands (21 points each)
+            for (let h = 0; h < 2; h++) {
+                let handMarkers = [];
+                for (let i = 0; i < 21; i++) {
+                    const m = new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+                    handsGroup.add(m);
+                    handMarkers.push(m);
+                }
+                handsData[h].points = handMarkers;
+            }
+
+            animate();
+        }
+
+        window.clearAll = () => { while(lineGroup.children.length > 0) lineGroup.remove(lineGroup.children[0]); activeLines = []; };
+        window.toggleSkeleton = () => { showSkeleton = !showSkeleton; handsGroup.visible = showSkeleton; };
+
+        function onResults(results) {
+            document.getElementById('system-loader').style.display = 'none';
+            
+            // Reset indicators
+            document.getElementById('dot-left').classList.remove('active');
+            document.getElementById('dot-right').classList.remove('active');
+            document.getElementById('dot-draw').classList.remove('active');
+            document.getElementById('dot-drag').classList.remove('active');
+
+            // Hide all points first
+            handsData.forEach(h => h.points.forEach(p => p.visible = false));
+
+            if (results.multiHandLandmarks) {
+                results.multiHandLandmarks.forEach((landmarks, index) => {
+                    const handType = results.multiHandedness[index].label; // Left or Right
+                    const hIdx = handType === "Left" ? 0 : 1;
+                    document.getElementById(`dot-${handType.toLowerCase()}`).classList.add('active');
+
+                    // Update skeleton points
+                    landmarks.forEach((lm, i) => {
+                        const x = (0.5 - lm.x) * 120 * (window.innerWidth / window.innerHeight);
+                        const y = (0.5 - lm.y) * 90;
+                        handsData[hIdx].points[i].position.set(x, y, 0);
+                        handsData[hIdx].points[i].visible = true;
+                    });
+
+                    const thumb = handsData[hIdx].points[4].position;
+                    const indexTip = handsData[hIdx].points[8].position;
+                    const middleTip = handsData[hIdx].points[12].position;
+                    
+                    // Gesture 1: Drawing (Index up, Middle down)
+                    const isPointing = indexTip.y > handsData[hIdx].points[6].position.y && middleTip.y < handsData[hIdx].points[10].position.y;
+                    
+                    // Gesture 2: Dragging (Pinch thumb and index)
+                    const isPinching = thumb.distanceTo(indexTip) < 4;
+
+                    if (isPinching) {
+                        document.getElementById('dot-drag').classList.add('active');
+                        handleDrag(thumb);
+                    } else if (isPointing) {
+                        document.getElementById('dot-draw').classList.add('active');
+                        handleDraw(indexTip, hIdx);
+                        draggingObject = null;
+                    } else {
+                        handsData[hIdx].isDrawing = false;
+                        draggingObject = null;
+                    }
+
+                    // Gesture 3: Clear (Fist)
+                    const wrist = landmarks[0];
+                    const isFist = [8,12,16,20].every(id => {
+                        const d = Math.sqrt(Math.pow(landmarks[id].x-wrist.x,2)+Math.pow(landmarks[id].y-wrist.y,2));
+                        return d < 0.12;
+                    });
+                    if(isFist) clearAll();
+                });
+            }
+        }
+
+        function handleDraw(pt, hIdx) {
+            if (!handsData[hIdx].isDrawing) {
+                handsData[hIdx].isDrawing = true;
+                const color = PALETTE[Math.floor(Math.random()*PALETTE.length)];
+                const mat = new THREE.LineBasicMaterial({ color: color, linewidth: 5 });
+                const geom = new THREE.BufferGeometry().setFromPoints([pt.clone()]);
+                const line = new THREE.Line(geom, mat);
+                lineGroup.add(line);
+                activeLines.push({ mesh: line, points: [pt.clone()] });
+            } else {
+                const cur = activeLines[activeLines.length - 1];
+                cur.points.push(pt.clone());
+                cur.mesh.geometry.setFromPoints(cur.points);
+            }
+        }
+
+        function handleDrag(thumbPt) {
+            if (!draggingObject) {
+                // Find nearest line
+                activeLines.forEach(lineObj => {
+                    const firstPt = lineObj.points[0];
+                    if (thumbPt.distanceTo(firstPt) < 10) {
+                        draggingObject = lineObj;
+                    }
+                });
+            } else {
+                // Move the entire line
+                const offset = thumbPt.clone().sub(draggingObject.points[0]);
+                draggingObject.points = draggingObject.points.map(p => p.add(offset));
+                draggingObject.mesh.geometry.setFromPoints(draggingObject.points);
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.8, minTrackingConfidence: 0.8 });
+        hands.onResults(onResults);
+
+        const videoElement = document.getElementById('input_video');
+        const cameraStream = new Camera(videoElement, {
+            onFrame: async () => { 
+                await hands.send({image: videoElement}); 
+                document.getElementById('video-preview').srcObject = videoElement.srcObject;
+            },
+            width: 640, height: 480
+        });
+        cameraStream.start();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        init();
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
